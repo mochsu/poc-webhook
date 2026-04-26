@@ -1,77 +1,44 @@
-// ─────────────────────────────────────────────────────
-// src/youtube.js — YouTube Auto-Upload
-//
-// Uploads proof videos to the POC YouTube channel.
-// Videos are set to "unlisted" — accessible via link
-// but not searchable. The video ID becomes part of
-// the proof chain hash.
-// ─────────────────────────────────────────────────────
-
 const { google } = require('googleapis');
 const { Readable } = require('stream');
-const { getAuth } = require('./sheets');
 
-// ── Upload a video buffer to YouTube ─────────────────
-// Returns the YouTube video ID (e.g. "mhzNY2QZsh0")
+function getAuth() {
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}');
+  return new google.auth.GoogleAuth({
+    credentials,
+    scopes: [
+      'https://www.googleapis.com/auth/youtube',
+      'https://www.googleapis.com/auth/spreadsheets'
+    ]
+  });
+}
+
 async function uploadVideo({ videoBuffer, title, description, tags = [] }) {
   console.log(`   Uploading to YouTube: "${title}"...`);
-
   const auth    = getAuth();
   const youtube = google.youtube({ version: 'v3', auth });
-
-  // Convert buffer to readable stream
-  const stream = Readable.from(videoBuffer);
-
+  const stream  = Readable.from(videoBuffer);
   try {
     const response = await youtube.videos.insert({
       part: ['snippet', 'status'],
       requestBody: {
-        snippet: {
-          title,
-          description,
-          tags: ['ProofOfCare', 'POC', ...tags],
-          categoryId: '22', // People & Blogs
-          defaultLanguage: 'en'
-        },
-        status: {
-          privacyStatus: 'unlisted',  // visible via link, not searchable
-          selfDeclaredMadeForKids: false
-        }
+        snippet: { title, description, tags: ['ProofOfCare', 'POC', ...tags], categoryId: '22' },
+        status:  { privacyStatus: 'unlisted', selfDeclaredMadeForKids: false }
       },
-      media: {
-        mimeType: 'video/mp4',
-        body: stream
-      }
+      media: { mimeType: 'video/mp4', body: stream }
     });
-
-    const videoId  = response.data.id;
-    const videoUrl = `https://youtube.com/watch?v=${videoId}`;
-    console.log(`   ✓ YouTube upload complete: ${videoUrl}`);
+    const videoId = response.data.id;
+    console.log(`   ✓ YouTube upload: https://youtube.com/watch?v=${videoId}`);
     return videoId;
-
   } catch (err) {
     console.error('YouTube upload failed:', err.message);
     throw err;
   }
 }
 
-// ── Build a standardised video title ─────────────────
-// Format matches the existing POC YouTube naming convention
-// e.g. "AMINA HASSAN (11156) - BEFORE VIDEO"
 function buildVideoTitle(childId, stage, childName = '') {
-  const stageLabel = {
-    BEFORE:     'BEFORE VIDEO',
-    DURING:     'DURING VIDEO',
-    AFTERCARE:  'AFTERCARE VIDEO',
-    HOME:       'HOME VIDEO',
-    REVIEW:     'REVIEW VIDEO',
-    PROSTHETIC: 'PROSTHETIC VIDEO'
-  }[stage] || `${stage} VIDEO`;
-
-  if (childName) {
-    return `${childName.toUpperCase()} (${childId}) - ${stageLabel}`;
-  }
-  return `POC (${childId}) - ${stageLabel}`;
+  const labels = { BEFORE:'BEFORE VIDEO', DURING:'DURING VIDEO', AFTERCARE:'AFTERCARE VIDEO', HOME:'HOME VIDEO' };
+  const label  = labels[stage] || `${stage} VIDEO`;
+  return childName ? `${childName.toUpperCase()} (${childId}) - ${label}` : `POC (${childId}) - ${label}`;
 }
 
-module.exports = { uploadVideo, buildVideoTitle };
+module.exports = { uploadVideo, buildVideoTitle, getAuth };
