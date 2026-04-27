@@ -1,81 +1,97 @@
-// ─────────────────────────────────────────────────────
-// server.js — POC Webhook Entry Point
-//
-// This server does two things:
-//   GET  /webhook  → verify the webhook with Meta (one-time setup)
-//   POST /webhook  → receive WhatsApp messages and process them
-// ─────────────────────────────────────────────────────
-
 require('dotenv').config();
 const express = require('express');
 const { processIncomingMessage } = require('./src/processor');
+const { pool } = require('./src/db/index');
 
 const app = express();
 app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
 
-// ── Webhook Verification (Meta calls this once during setup) ──
-// Meta sends a GET request with a challenge. We respond with
-// the challenge to prove we own this URL.
-app.get('/webhook', (req, res) => {
-  const mode      = req.query['hub.mode'];
-  const token     = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
+// Auto-run migrations on startup
+async function runMigrations() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS workers (
+        id SERIAL PRIMARY KEY, phone TEXT UNIQUE NOT NULL,
+        worker_code TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'OUTREACH', trust_level TEXT NOT NULL DEFAULT 'NEW',
+        wallet TEXT, rating DECIMAL(3,2) DEFAULT 0, cases_total INTEGER DEFAULT 0,
+        cases_verified INTEGER DEFAULT 0, fraud_flags INTEGER DEFAULT 0,
+        country TEXT DEFAULT 'TZ', notes TEXT,
+        registered_at TIMESTAMP DEFAULT NOW(), last_active TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS children (
+        id SERIAL PRIMARY KEY, child_id TEXT UNIQUE NOT NULL,
+        outcome_id TEXT, country TEXT NOT NULL DEFAULT 'TZ',
+        diagnosis_code TEXT, demographics TEXT, stage TEXT NOT NULL DEFAULT 'REGISTERED',
+        worker_phone TEXT, before_video_id TEXT, surgery_video_id TEXT,
+        aftercare_video_id TEXT, home_video_id TEXT, face_hash TEXT,
+        donor_wallet TEXT, usdc_amount DECIMAL(10,2), chain_hash TEXT,
+        star_rating INTEGER, notes TEXT, registered_at TIMESTAMP DEFAULT NOW(),
+        surgery_at TIMESTAMP, home_at TIMESTAMP, paid_at TIMESTAMP
+      );
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS submissions (
+        id SERIAL PRIMARY KEY, worker_phone TEXT, child_id TEXT,
+        stage TEXT, video_id TEXT, status TEXT DEFAULT 'PENDING',
+        ai_result JSONB, error_message TEXT,
+        submitted_at TIMESTAMP DEFAULT NOW(), processed_at TIMESTAMP
+      );
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS face_hashes (
+        id SERIAL PRIMARY KEY, child_id TEXT, face_hash TEXT NOT NULL,
+        confidence DECIMAL(4,3), created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS payments (
+        id SERIAL PRIMARY KEY, child_id TEXT, worker_phone TEXT,
+        role TEXT, usdc_amount DECIMAL(10,2), tx_hash TEXT,
+        status TEXT DEFAULT 'PENDING', paid_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✓ Database tables ready');
+  } catch (err) {
+    console.error('Migration error:', err.message);
+  }
+}
 
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
   if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
-    console.log('✓ Webhook verified by Meta');
+    console.log('✓ Webhook verified');
     res.status(200).send(challenge);
   } else {
-    console.log('✗ Webhook verification failed — check WHATSAPP_VERIFY_TOKEN');
     res.sendStatus(403);
   }
 });
 
-// ── Receive Messages ──────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
-  // Always respond 200 immediately — Meta resends if no response within 20s
   res.sendStatus(200);
-
   try {
     const body = req.body;
-
-    // Check this is a WhatsApp message event
     if (body.object !== 'whatsapp_business_account') return;
-
-    const entry   = body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value   = changes?.value;
-
-    // Skip status updates (delivered/read receipts)
-    if (!value?.messages || value.messages.length === 0) return;
-
-    const message = value.messages[0];
-    const from    = message.from; // sender's phone number
-
-    console.log(`\n📱 Message received from ${from}`);
-    console.log(`   Type: ${message.type}`);
-    if (message.text)  console.log(`   Text: ${message.text.body}`);
-    if (message.video) console.log(`   Video ID: ${message.video.id}`);
-
-    // Hand off to the processor — this does all the work
+    const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if (!message) return;
+    const from = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
+    console.log(`📱 Message from ${from}`);
     await processIncomingMessage(from, message);
-
   } catch (err) {
-    console.error('Error processing webhook:', err);
+    console.error('Webhook error:', err);
   }
 });
 
-// ── Health check ──────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({
-    status: 'POC Webhook running',
-    time: new Date().toISOString()
-  });
+  res.json({ status: 'POC Webhook running', time: new Date().toISOString() });
 });
 
-app.listen(PORT, () => {
-  console.log(`\n🚀 POC Webhook server running on port ${PORT}`);
-  console.log(`   Webhook URL: https://your-railway-url.up.railway.app/webhook`);
-  console.log(`   Health check: https://your-railway-url.up.railway.app/\n`);
+app.listen(PORT, async () => {
+  console.log(`🚀 POC Webhook running on port ${PORT}`);
+  await runMigrations();
 });
